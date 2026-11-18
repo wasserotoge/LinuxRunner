@@ -112,12 +112,21 @@
         allowTransparency: true,
         scrollback: 10000,
         convertEol: false,
-        disableStdin: true,  // iOS handles text input natively
+        // xterm drops everything it would send while stdin is disabled, which
+        // includes its replies to terminal queries (DSR, DA, OSC 11 colour...):
+        // Neovim then reports E1568. Text input stays native: the key handler
+        // below and the read-only textarea keep the page from typing.
+        disableStdin: false,
         allowProposedApi: true,
         overviewRuler: {width: 0},
         smoothScrollDuration: 0,
         windowsMode: false,
     });
+
+    // iOS keyboard input reaches the terminal through TerminalView, never
+    // through the page; should the web view ever hold key focus, its key
+    // events must not become a second copy of the input.
+    term.attachCustomKeyEventHandler(() => false);
 
     const fitAddon = new FitAddon();
     term.loadAddon(new CanvasAddon());
@@ -279,18 +288,16 @@
             const target = terminalElement.querySelector('.xterm-screen') || term.element;
             if (!count || !target)
                 return;
-            withStdin(() => {
-                for (let i = 0; i < count; i++) {
-                    target.dispatchEvent(new WheelEvent('wheel', {
-                        deltaY: lines < 0 ? -1 : 1,
-                        deltaMode: WheelEvent.DOM_DELTA_LINE,
-                        clientX: x,
-                        clientY: y,
-                        bubbles: true,
-                        cancelable: true,
-                    }));
-                }
-            });
+            for (let i = 0; i < count; i++) {
+                target.dispatchEvent(new WheelEvent('wheel', {
+                    deltaY: lines < 0 ? -1 : 1,
+                    deltaMode: WheelEvent.DOM_DELTA_LINE,
+                    clientX: x,
+                    clientY: y,
+                    bubbles: true,
+                    cancelable: true,
+                }));
+            }
         },
         selectAll() { selectionAnchor = null; term.selectAll(); },
         clearSelection() { selectionAnchor = null; term.clearSelection(); },
@@ -483,21 +490,6 @@
         });
     }
 
-    // xterm drops everything it would send while stdin is disabled, which
-    // includes wheel-generated arrow keys and mouse reports.
-    function withStdin(action) {
-        const disabled = term.options.disableStdin;
-        if (disabled)
-            term.options.disableStdin = false;
-        try {
-            action();
-        } finally {
-            if (disabled) {
-                term.options.disableStdin = true;
-                disableWebTextInput();
-            }
-        }
-    }
 
     function installFocusBridge() {
         // TerminalView handles touches natively (focus, scrolling, selection)
