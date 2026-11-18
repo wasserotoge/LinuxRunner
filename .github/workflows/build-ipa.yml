@@ -1,0 +1,88 @@
+name: Build unsigned IPA
+
+# Builds the LinuxRunner scheme on a GitHub-hosted Mac and uploads an
+# unsigned (ad-hoc signed) IPA for sideloading tools that re-sign it.
+# Interpreter/software variant by default; the Metal GPU variant
+# (LINUXRUNNER_VIRGL=YES) needs scripts/build-gpu-deps.sh and is not built here.
+
+on:
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
+    inputs:
+      jit:
+        description: Build the JIT-capable variant (LINUXRUNNER_JIT=YES)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    name: Unsigned IPA
+    # Xcode 27.2 / iPhoneOS SDK 27.2, as recorded for the official build 900
+    # archive; the app uses iOS 27 APIs, so an Xcode 26 image cannot build it.
+    runs-on: xcode-27
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      LINUXRUNNER_JIT: ${{ inputs.jit && 'YES' || 'NO' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Initialize pinned submodules
+        # deps/linux is not used by the app and is skipped on purpose.
+        run: >
+          git submodule update --init --recursive --checkout --
+          deps/libapps deps/libarchive deps/glslang deps/spirv-cross
+
+      - name: Install Meson and LLD
+        run: |
+          brew install meson lld
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          meson --version
+          ld.lld --version
+          cmake --version | head -n 1
+
+      - name: Check prerequisites
+        run: scripts/bootstrap-macos.sh
+
+      - name: Build unsigned IPA
+        run: scripts/build-ipa.sh --unsigned
+
+      - name: Verify IPA
+        run: python3 scripts/verify-ipa.py build/releases
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: LinuxRunner-unsigned-${{ github.sha }}
+          path: |
+            build/releases/LinuxRunner.ipa
+            build/releases/LinuxRunner.ipa.sha256
+            build/releases/LinuxRunner.validation.json
+            build/releases/SIGNING-STATUS.txt
+            build/releases/source-revision.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-${{ github.sha }}
+          path: build/releases/archive.log
+          if-no-files-found: ignore
+          retention-days: 7
