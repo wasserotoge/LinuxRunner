@@ -132,6 +132,18 @@ jobs:
       - name: Verify IPA
         run: python3 scripts/verify-ipa.py build/releases
 
+      - name: Summarize verification
+        run: |
+          python3 - build/releases/artifact-verification.json <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          keys = ('jit_variant_declared', 'execution_build_options', 'gpu_variant',
+                  'gpu_egl_exports', 'ipa_executable_matches_archive')
+          text = '\n'.join(f'{k}: {json.dumps(r.get(k))}' for k in keys)
+          print(text)
+          print('::notice title=IPA verification::' + text.replace('%', '%25').replace('\n', '%0A'))
+          PY
+
       - name: Upload IPA
         uses: actions/upload-artifact@v7
         with:
@@ -140,6 +152,7 @@ jobs:
             build/releases/LinuxRunner.ipa
             build/releases/LinuxRunner.ipa.sha256
             build/releases/LinuxRunner.validation.json
+            build/releases/artifact-verification.json
             build/releases/SIGNING-STATUS.txt
             build/releases/source-revision.txt
           if-no-files-found: error
