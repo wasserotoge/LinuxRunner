@@ -305,7 +305,11 @@
 
     char argv[4096];
     [Terminal convertCommand:command toArgs:argv limitSize:sizeof(argv)];
+    // A UTF-8 locale unless the guest configures its own: in the C locale a
+    // shell counts each byte of a UTF-8 prompt character (Kali's └─) as a
+    // column, so long command lines wrap in the wrong place.
     const char *envp = "TERM=xterm-256color\0"
+        "LANG=C.UTF-8\0"
         "HOME=/root\0"
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0"
 #if defined(GUEST_ARM64)

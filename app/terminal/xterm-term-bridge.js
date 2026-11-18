@@ -106,12 +106,7 @@
         rows: 24,
         fontSize: styleState.fontSize,
         fontFamily: styleState.fontFamily,
-        theme: {
-            foreground: styleState.foregroundColor,
-            background: styleState.backgroundColor,
-            cursor: styleState.cursorColor || styleState.foregroundColor,
-            cursorAccent: styleState.backgroundColor,
-        },
+        theme: themeForXterm(styleState),
         cursorBlink: styleState.blinkCursor,
         cursorStyle: cursorStyleForXterm(styleState.cursorShape),
         allowTransparency: true,
@@ -691,13 +686,17 @@
     }
 
     function themeForXterm(style) {
+        // A translucent iOS-blue highlight that keeps each character's own
+        // colour, matching the native selection handles. (xterm turns an
+        // opaque selection colour 70% transparent, so the old foreground-on-
+        // background inversion drew dark text on dark grey.)
         const theme = {
             foreground: style.foregroundColor,
             background: style.backgroundColor,
             cursor: style.cursorColor || style.foregroundColor,
             cursorAccent: style.backgroundColor,
-            selectionBackground: style.foregroundColor,
-            selectionForeground: style.backgroundColor,
+            selectionBackground: 'rgba(10, 132, 255, 0.4)',
+            selectionInactiveBackground: 'rgba(10, 132, 255, 0.3)',
         };
         if (Array.isArray(style.colorPaletteOverrides)) {
             for (let i = 0; i < Math.min(ansiColorNames.length, style.colorPaletteOverrides.length); i++)

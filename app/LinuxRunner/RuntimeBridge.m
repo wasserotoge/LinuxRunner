@@ -1459,6 +1459,12 @@ static NSArray<NSString *> *LRLoginCommand(NSString *name, NSError **error) {
     if (!su) { if (error) *error = lrError(ENOENT, @"Install the distribution's su/login tools first."); return nil; }
     // Guest su implements UID/GID, supplementary groups, HOME, USER, LOGNAME,
     // login directory and shell. Root parent is retained for administration.
+    // A login su keeps only TERM; util-linux su (the glibc distributions) can
+    // keep the session's UTF-8 LANG too. A locale the guest configures through
+    // PAM (/etc/default/locale) still takes precedence.
+    if (LRRuntimeBridge.activeEnvironmentIsDebian || LRRuntimeBridge.activeEnvironmentIsArch ||
+        LRRuntimeBridge.activeEnvironmentIsFedora || LRRuntimeBridge.activeEnvironmentIsSteamOS)
+        return @[su, @"-l", @"--whitelist-environment=LANG", name];
     return @[su, @"-l", name];
 }
 + (NSArray *)defaultLinuxLoginCommand:(NSError **)error {
