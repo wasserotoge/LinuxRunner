@@ -109,6 +109,11 @@ jobs:
         if: env.LINUXRUNNER_VIRGL == 'YES' && steps.gpu-cache.outputs.cache-hit != 'true'
         run: |
           set -o pipefail
+          # virglrenderer's Meson build needs a python3 with PyYAML.
+          python3 -m venv "$RUNNER_TEMP/gpu-venv"
+          "$RUNNER_TEMP/gpu-venv/bin/python3" -m pip install --quiet pyyaml
+          export PATH="$RUNNER_TEMP/gpu-venv/bin:$PATH"
+          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
           scripts/build-gpu-deps.sh iphoneos 2>&1 | tee "$RUNNER_TEMP/gpu-deps.log"
           cat build/gpu/iphoneos/REVISIONS
           # Only lib/ and include/ are linked by the app; drop the build trees.
