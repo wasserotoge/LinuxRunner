@@ -108,7 +108,8 @@ jobs:
       - name: Build GPU dependencies
         if: env.LINUXRUNNER_VIRGL == 'YES' && steps.gpu-cache.outputs.cache-hit != 'true'
         run: |
-          scripts/build-gpu-deps.sh iphoneos
+          set -o pipefail
+          scripts/build-gpu-deps.sh iphoneos 2>&1 | tee "$RUNNER_TEMP/gpu-deps.log"
           cat build/gpu/iphoneos/REVISIONS
           # Only lib/ and include/ are linked by the app; drop the build trees.
           rm -rf build/gpu/iphoneos/work
@@ -138,6 +139,29 @@ jobs:
             build/releases/source-revision.txt
           if-no-files-found: error
           retention-days: 14
+
+      - name: Report failure details
+        if: failure()
+        run: |
+          out="$RUNNER_TEMP/failure"
+          mkdir -p "$out"
+          # build-gpu-deps.sh discards Meson/Ninja stdout for libepoxy and
+          # virglrenderer; re-running Ninja prints the failing command again.
+          for dir in build/gpu/iphoneos/work/epoxy-build build/gpu/iphoneos/work/virgl-build; do
+            name=$(basename "$dir")
+            if [ -f "$dir/build.ninja" ]; then ninja -C "$dir" > "$out/$name-ninja.txt" 2>&1 || true; fi
+            if [ -f "$dir/meson-logs/meson-log.txt" ]; then cp "$dir/meson-logs/meson-log.txt" "$out/$name-meson.txt"; fi
+          done
+          if [ -f build/releases/archive.log ]; then
+            grep -E 'error:|FAILED|\*\* ARCHIVE' build/releases/archive.log > "$out/xcodebuild-errors.txt" || true
+          fi
+          python3 .github/scripts/annotate-logs.py \
+            "xcodebuild errors=$out/xcodebuild-errors.txt" \
+            "GPU deps log=$RUNNER_TEMP/gpu-deps.log" \
+            "virglrenderer ninja=$out/virgl-build-ninja.txt" \
+            "libepoxy ninja=$out/epoxy-build-ninja.txt" \
+            "virglrenderer meson=$out/virgl-build-meson.txt" \
+            "libepoxy meson=$out/epoxy-build-meson.txt"
 
       - name: Upload build log
         if: failure()
