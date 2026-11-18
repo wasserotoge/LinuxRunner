@@ -36,6 +36,7 @@ typedef struct linux_tty *tty_t;
 
 @property DelayedUITask *refreshTask;
 @property BOOL applicationCursor;
+@property (readwrite) BOOL bracketedPaste;
 @property (nonatomic) NSUInteger windowSizeRequestID;
 @property (nonatomic) int lastWindowCols;
 @property (nonatomic) int lastWindowRows;
@@ -125,6 +126,7 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
         [config.userContentController addScriptMessageHandler:self name:@"load"];
         [config.userContentController addScriptMessageHandler:self name:@"log"];
         [config.userContentController addScriptMessageHandler:self name:@"sendInput"];
+        [config.userContentController addScriptMessageHandler:self name:@"sendBinary"];
         [config.userContentController addScriptMessageHandler:self name:@"resize"];
         [config.userContentController addScriptMessageHandler:self name:@"propUpdate"];
         // Make the web view really big so that if a program tries to write to the terminal before it's displayed, the text probably won't wrap too badly.
@@ -207,6 +209,14 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
         if (data == nil)
             return;
         [self sendInput:data];
+    } else if ([message.name isEqualToString:@"sendBinary"]) {
+        // One byte per character (X10 mouse reports), not UTF-8.
+        if (![message.body isKindOfClass:NSString.class])
+            return;
+        NSData *data = [message.body dataUsingEncoding:NSISOLatin1StringEncoding];
+        if (data.length == 0)
+            return;
+        [self sendInput:data];
     } else if ([message.name isEqualToString:@"resize"]) {
         [self syncWindowSize];
     } else if ([message.name isEqualToString:@"propUpdate"]) {
@@ -218,6 +228,8 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
         NSString *property = body[0];
         if ([property isEqualToString:@"applicationCursor"] && [body[1] isKindOfClass:NSNumber.class])
             self.applicationCursor = [body[1] boolValue];
+        else if ([property isEqualToString:@"bracketedPaste"] && [body[1] isKindOfClass:NSNumber.class])
+            self.bracketedPaste = [body[1] boolValue];
     }
 }
 

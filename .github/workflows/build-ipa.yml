@@ -48,6 +48,9 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
 
+      - name: Check terminal bridge syntax
+        run: node --check app/terminal/xterm-term-bridge.js
+
       - name: Initialize pinned submodules
         # deps/linux is not used by the app and is skipped on purpose.
         run: >

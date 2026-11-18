@@ -95,7 +95,10 @@
     let nativeScrollRequest = null;
     let oldProps = {};
     let xtermAppActive = null;
+    // Cells the current selection gesture started from, end exclusive:
+    // {startCol, startRow, endCol, endRow, word}. Rows are buffer rows.
     let selectionAnchor = null;
+    let pendingSelectionGeometry = false;
 
     // ── Terminal setup ────────────────────────────────────────────────────────
     const term = new Terminal({
@@ -130,13 +133,26 @@
         native.sendInput(data);
         syncApplicationCursor();
     });
+    // X10-encoded mouse reports are bytes, not UTF-8 text.
+    term.onBinary((data) => native.sendBinary(data));
     term.onResize(() => {
         native.resize();
         scheduleScrollSync();
+        scheduleSelectionGeometry();
     });
-    term.onScroll(scheduleScrollSync);
+    term.onScroll(() => {
+        scheduleScrollSync();
+        scheduleSelectionGeometry();
+    });
     term.onCursorMove(syncApplicationCursor);
-    term.onSelectionChange(() => native.selectionChanged(term.getSelection()));
+    term.onSelectionChange(() => {
+        native.selectionChanged(term.getSelection());
+        scheduleSelectionGeometry();
+    });
+    term.buffer.onBufferChange((buffer) => {
+        native.bufferType(buffer.type);
+        scheduleSelectionGeometry();
+    });
 
     term.open(terminalElement);
     installNativeFocusAdapter();
@@ -165,6 +181,7 @@
             }
             native.resize();
             scheduleScrollSync();
+            scheduleSelectionGeometry();
         });
     }
 
@@ -193,21 +210,94 @@
         copy() {
             return term.getSelection();
         },
+        // Long press: select the word under the point. Returns whether a word
+        // was found; on blank cells the gesture can still drag out a range.
+        selectWordAt(x, y) {
+            const cell = selectionCell(x, y);
+            if (!cell) {
+                selectionAnchor = null;
+                return false;
+            }
+            const word = wordRange(cell.row, cell.col);
+            if (!word) {
+                selectionAnchor = {startCol: cell.col, startRow: cell.row, endCol: cell.col + 1, endRow: cell.row, word: false};
+                term.clearSelection();
+                return false;
+            }
+            selectionAnchor = {...word, word: true};
+            selectRange(word.startCol, word.startRow, word.endCol, word.endRow);
+            return true;
+        },
+        // Pointer drag: character selection from the press point.
         beginSelection(x, y) {
-            selectionAnchor = selectionCell(x, y);
-            if (selectionAnchor)
-                term.select(selectionAnchor.col, selectionAnchor.row, 1);
+            const cell = selectionCell(x, y);
+            selectionAnchor = cell ? {startCol: cell.col, startRow: cell.row, endCol: cell.col + 1, endRow: cell.row, word: false} : null;
+            term.clearSelection();
         },
         extendSelection(x, y) {
-            const end = selectionCell(x, y);
-            if (!selectionAnchor || !end)
+            const cell = selectionCell(x, y);
+            if (!selectionAnchor || !cell)
                 return;
-            const a = selectionAnchor.row * term.cols + selectionAnchor.col;
-            const b = end.row * term.cols + end.col;
-            const start = Math.min(a, b);
-            term.select(start % term.cols, Math.floor(start / term.cols), Math.abs(a - b) + 1);
+            const cols = term.cols;
+            const anchorStart = selectionAnchor.startRow * cols + selectionAnchor.startCol;
+            const anchorEnd = selectionAnchor.endRow * cols + selectionAnchor.endCol;
+            const point = cell.row * cols + cell.col;
+            if (point >= anchorEnd)
+                selectLinear(anchorStart, point + 1);
+            else if (point < anchorStart)
+                selectLinear(point, anchorEnd);
+            else if (selectionAnchor.word)
+                selectLinear(anchorStart, anchorEnd);
+            else
+                term.clearSelection();
         },
-        selectAll() { term.selectAll(); },
+        // Selection handles: move one end of the selection to the cell
+        // boundary nearest the point, keeping at least one cell selected.
+        dragSelectionHandle(which, x, y) {
+            const pos = term.getSelectionPosition();
+            const boundary = selectionBoundary(x, y);
+            if (!pos || !boundary)
+                return;
+            const cols = term.cols;
+            const start = pos.start.y * cols + pos.start.x;
+            const end = pos.end.y * cols + pos.end.x;
+            const point = boundary.row * cols + boundary.col;
+            selectionAnchor = null;
+            if (which === 'start')
+                selectLinear(Math.min(point, end - 1), end);
+            else
+                selectLinear(start, Math.max(point, start + 1));
+        },
+        selectionGeometry() {
+            return selectionGeometry();
+        },
+        bufferType() {
+            return term.buffer.active.type;
+        },
+        // Touch scrolling where there is no scrollback (the alternate screen):
+        // one wheel notch per line, so xterm reports wheel events to
+        // mouse-aware programs and sends arrow keys to the others.
+        scrollLines(lines, x, y) {
+            if (!Number.isFinite(lines) || !Number.isFinite(x) || !Number.isFinite(y))
+                return;
+            const count = Math.min(Math.abs(Math.trunc(lines)), 200);
+            const target = terminalElement.querySelector('.xterm-screen') || term.element;
+            if (!count || !target)
+                return;
+            withStdin(() => {
+                for (let i = 0; i < count; i++) {
+                    target.dispatchEvent(new WheelEvent('wheel', {
+                        deltaY: lines < 0 ? -1 : 1,
+                        deltaMode: WheelEvent.DOM_DELTA_LINE,
+                        clientX: x,
+                        clientY: y,
+                        bubbles: true,
+                        cancelable: true,
+                    }));
+                }
+            });
+        },
+        selectAll() { selectionAnchor = null; term.selectAll(); },
         clearSelection() { selectionAnchor = null; term.clearSelection(); },
         setFocused(focused) {
             terminalElement.classList.toggle('terminal-focused', !!focused);
@@ -266,6 +356,7 @@
     fitTerminal();
     native.load();
     native.syncFocus();
+    native.bufferType(term.buffer.active.type);
 
     function disableWebTextInput() {
         if (!term.textarea)
@@ -290,18 +381,136 @@
         };
     }
 
+    // The cell boundary nearest to x on the row under y; col runs 0...cols.
+    function selectionBoundary(x, y) {
+        const screen = terminalElement.querySelector('.xterm-screen');
+        const cell = getCellSize();
+        if (!screen || !cell.width || !cell.height || !Number.isFinite(x) || !Number.isFinite(y))
+            return null;
+        const rect = screen.getBoundingClientRect();
+        return {
+            col: Math.max(0, Math.min(term.cols, Math.round((x - rect.left) / cell.width))),
+            row: term.buffer.active.viewportY + Math.max(0, Math.min(term.rows - 1, Math.floor((y - rect.top) / cell.height))),
+        };
+    }
+
+    // Select cells [start, end) in row-major cell order.
+    function selectLinear(start, end) {
+        const cols = term.cols;
+        if (!cols || !(end > start)) {
+            term.clearSelection();
+            return;
+        }
+        term.select(start % cols, Math.floor(start / cols), end - start);
+    }
+
+    function selectRange(startCol, startRow, endCol, endRow) {
+        selectLinear(startRow * term.cols + startCol, endRow * term.cols + endCol);
+    }
+
+    function isWordCell(line, col) {
+        if (col < 0 || col >= term.cols)
+            return false;
+        const cell = line.getCell(col);
+        if (!cell)
+            return false;
+        // The second half of a wide character belongs to the first half.
+        if (cell.getWidth() === 0)
+            return col > 0 && isWordCell(line, col - 1);
+        const chars = cell.getChars();
+        if (!chars || /^\s+$/.test(chars))
+            return false;
+        return !String(term.options.wordSeparator ?? ' ()[]{}\',"`').includes(chars);
+    }
+
+    // Same word rule as xterm's double-click selection, within one row.
+    function wordRange(row, col) {
+        const line = term.buffer.active.getLine(row);
+        if (!line || !isWordCell(line, col))
+            return null;
+        let start = col;
+        while (start > 0 && isWordCell(line, start - 1))
+            start--;
+        let end = col + 1;
+        while (end < term.cols && isWordCell(line, end))
+            end++;
+        return {startCol: start, startRow: row, endCol: end, endRow: row};
+    }
+
+    // Where the selection ends are on screen, in page (web view) coordinates.
+    // start/end are the top of the first and last selected rows at the
+    // selection's left and right edges; bounds encloses the visible part.
+    function selectionGeometry() {
+        const pos = term.hasSelection() ? term.getSelectionPosition() : undefined;
+        const screen = terminalElement.querySelector('.xterm-screen');
+        const cell = getCellSize();
+        if (!pos || !screen || !cell.width || !cell.height)
+            return null;
+        const rect = screen.getBoundingClientRect();
+        const top = term.buffer.active.viewportY;
+        let endCol = pos.end.x;
+        let endRow = pos.end.y;
+        if (endCol <= 0 && endRow > pos.start.y) {
+            endRow -= 1;
+            endCol = term.cols;
+        }
+        const rowTop = (row) => rect.top + (row - top) * cell.height;
+        const onScreen = (row) => row >= top && row < top + term.rows;
+        const firstVisible = Math.max(pos.start.y, top);
+        const lastVisible = Math.min(endRow, top + term.rows - 1);
+        let bounds = null;
+        if (firstVisible <= lastVisible) {
+            const singleRow = pos.start.y === endRow;
+            const left = singleRow ? rect.left + pos.start.x * cell.width : rect.left;
+            const right = singleRow ? rect.left + endCol * cell.width : rect.left + term.cols * cell.width;
+            bounds = {
+                x: left,
+                y: rowTop(firstVisible),
+                width: Math.max(right - left, 1),
+                height: (lastVisible - firstVisible + 1) * cell.height,
+            };
+        }
+        return {
+            start: {x: rect.left + pos.start.x * cell.width, y: rowTop(pos.start.y), visible: onScreen(pos.start.y)},
+            end: {x: rect.left + endCol * cell.width, y: rowTop(endRow), visible: onScreen(endRow)},
+            lineHeight: cell.height,
+            bounds,
+        };
+    }
+
+    function scheduleSelectionGeometry() {
+        if (pendingSelectionGeometry)
+            return;
+        pendingSelectionGeometry = true;
+        requestAnimationFrame(() => {
+            pendingSelectionGeometry = false;
+            native.selectionGeometry(selectionGeometry());
+        });
+    }
+
+    // xterm drops everything it would send while stdin is disabled, which
+    // includes wheel-generated arrow keys and mouse reports.
+    function withStdin(action) {
+        const disabled = term.options.disableStdin;
+        if (disabled)
+            term.options.disableStdin = false;
+        try {
+            action();
+        } finally {
+            if (disabled) {
+                term.options.disableStdin = true;
+                disableWebTextInput();
+            }
+        }
+    }
+
     function installFocusBridge() {
+        // TerminalView handles touches natively (focus, scrolling, selection)
+        // and keeps them from reaching the page; this only stops WebKit's own
+        // touch behaviour should one arrive anyway.
         terminalElement.addEventListener('touchstart', (event) => {
-            if (!term.hasSelection())
-                event.preventDefault();
-        }, {capture: true});
-        terminalElement.addEventListener('touchend', (event) => {
-            if (term.hasSelection())
-                term.clearSelection();
             event.preventDefault();
-            event.stopImmediatePropagation();
-            native.focus();
-        }, {capture: true});
+        }, {capture: true, passive: false});
         terminalElement.addEventListener('mousedown', (event) => {
             event.preventDefault();
             if (!term.hasSelection())
@@ -399,6 +608,7 @@
 
     function syncApplicationCursor() {
         syncProp('applicationCursor', !!term.modes?.applicationCursorKeysMode);
+        syncProp('bracketedPaste', !!term.modes?.bracketedPasteMode);
     }
 
     function syncProp(name, value) {
